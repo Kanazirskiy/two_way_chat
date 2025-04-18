@@ -228,7 +228,6 @@ def listen_for_connection(host, port, sig_cer, sig_key, kem_cer, kem_key, truste
         conn, addr = s.accept()
         print(f"Подключение от {addr}. Введите сообщения (exit для выхода):")
 
-        # Отправляем свои сертификаты и ключи инициатору
         send_file_data(conn, sig_cer)
         send_file_data(conn, sig_key)
         send_file_data(conn, kem_cer)
@@ -268,7 +267,6 @@ def verify_trusted_data(cert_base64, kem_cer_base64, trusted_sig, trusted_kem):
     trusted_sig_hash = trusted_sig.decode().strip().upper()
     trusted_kem_hash = trusted_kem.decode().strip().upper()
 
-    # Сравниваем хэши
     if cert_hash == trusted_sig_hash and key_hash == trusted_kem_hash:
         return True
     else:
