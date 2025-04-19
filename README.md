@@ -1,4 +1,12 @@
 # two_way_chat
+Безопасный чат на двоих
+
+
+## Зависимости
+
+- [pygost](http://www.pygost.cypherpunks.su/)
+- [pyderasn](http://www.pyderasn.cypherpunks.su/)
+
 
 python3 twoway.py --bind "0.0.0.0:port" 
   --sig-cer for-signature.cer 
