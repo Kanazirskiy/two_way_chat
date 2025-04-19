@@ -5,7 +5,7 @@ import threading
 from os import urandom
 from classes import *
 from pygost.gost34112012512 import new as gost3411_256
-from pygost.gost3410 import sign, prv_unmarshal, public_key, CURVES, pub_marshal
+from pygost.gost3410 import sign, prv_unmarshal, public_key, CURVES, pub_marshal,pub_unmarshal
 from pygost.utils import hexenc
 import pyderasn
 import base64
@@ -18,7 +18,7 @@ from pygost.gost3410_vko import kek_34102012256
 from pygost.kdf import kdf_gostr3411_2012_256
 from pygost.gost28147 import cfb_encrypt, cfb_decrypt
 
-curve = CURVES["id-tc26-gost-3410-12-512-paramSetA"]
+curve = CURVES["id-tc26-gost-3410-12-256-paramSetA"]
 BLOCK_SIZE = 16
 
 def unpad(data):
@@ -35,7 +35,7 @@ def pad(data):
 def chunk(data, size):
     return [data[i:i+size] for i in range(0, len(data), size)]
 
-def receive_messages(conn, sig_prv_raw, sig_cert_der,kem_cer,recipient_prv_raw,prv_raw, sender_pub,recipient_pub,sender_pub_cer_key):
+def receive_messages(conn,recipient_prv_raw, sender_sig_pub,sender_pub):
     recipient_prv = prv_unmarshal(recipient_prv_raw)
     while True:
             len_bytes = conn.recv(4)
@@ -59,7 +59,6 @@ def receive_messages(conn, sig_prv_raw, sig_cert_der,kem_cer,recipient_prv_raw,p
 
             ciphertext1 = encrypted_key._value
 
-            sender_pub = public_key(curve, prv_unmarshal(prv_raw))
             ukm_bytes = b"\x01\x02\x03\x04\x05\x06\x07\x08"
             seed = b"\x09\x0A\x0B\x0C\x0D\x0E\x0F\x10"
             ukm = int.from_bytes(ukm_bytes, "little")
@@ -84,13 +83,13 @@ def receive_messages(conn, sig_prv_raw, sig_cert_der,kem_cer,recipient_prv_raw,p
             signature = signer_info["signature"]._value
 
             dgst = gost3411_256(signed_content).digest()[::-1]
-
+            valid = verify(curve, sender_sig_pub, dgst, signature)
+            if (not valid):
+                print("Подпись не корректна")
             print(f"\n[СООБЩЕНИЕ ОТ СОБЕСЕДНИКА] {signed_content.decode('utf-8')}")
 
 
-curve = CURVES["id-tc26-gost-3410-12-512-paramSetA"]
-
-def send_messages(sock, sig_prv_raw, sig_cert_der,kem_cer,prv_raw, recipient_prv_raw, sender_pub,recipient_pub):
+def send_messages(sock, sig_prv_raw, sig_cert_der,prv_raw,recipient_pub):
     sig_prv = prv_unmarshal(sig_prv_raw)
 
     while True:
@@ -154,7 +153,7 @@ def send_messages(sock, sig_prv_raw, sig_cert_der,kem_cer,prv_raw, recipient_prv
             ukm_bytes = b"\x01\x02\x03\x04\x05\x06\x07\x08"
             ukm = int.from_bytes(ukm_bytes, "little")
             seed = b"\x09\x0A\x0B\x0C\x0D\x0E\x0F\x10"
-            shared_secret = kek_34102012256(curve, prv_unmarshal(prv_raw), public_key(curve, prv_unmarshal(recipient_prv_raw)), ukm)
+            shared_secret = kek_34102012256(curve, prv_unmarshal(prv_raw), recipient_pub, ukm)
             key = kdf_gostr3411_2012_256(shared_secret, ukm_bytes, seed)
             iv = urandom(8)
             ciphertext = cfb_encrypt(key, session_key, iv=b"\x00" * 8)
@@ -165,7 +164,6 @@ def send_messages(sock, sig_prv_raw, sig_cert_der,kem_cer,prv_raw, recipient_prv
 
 
             sender_prv = prv_unmarshal(prv_raw)
-            recipient_prv = prv_unmarshal(recipient_prv_raw)
 
 
             recipient_info = RecipientInfo([
@@ -216,23 +214,28 @@ def initiate_connection(host, port, sig_cer, sig_key, kem_cer, kem_key, trusted_
         print(f"Подключено к {host}:{port}. Введите сообщения (exit для выхода):")
 
         remote_cert = receive_file_data(s)
-        remote_key = receive_file_data(s)
         remote_kem_cer = receive_file_data(s)
-        remote_kem_key = receive_file_data(s)
         remote_trusted_sig = receive_file_data(s)
         remote_trusted_kem = receive_file_data(s)
 
+
         send_file_data(s, sig_cer)
-        send_file_data(s, sig_key)
         send_file_data(s, kem_cer)
-        send_file_data(s, kem_key)
         send_file_data(s, trusted_sig)
         send_file_data(s, trusted_kem)
 
         if verify_trusted_data(remote_cert, remote_kem_cer, remote_trusted_sig, remote_trusted_kem):
             print("Сертификаты подтверждены.")
-            threading.Thread(target=receive_messages, args=(s,sig_key, sig_cer,kem_cer,kem_key, remote_kem_key,extract_subject_public_key_info_hash(remote_kem_cer),extract_subject_public_key_info_hash(kem_cer),extract_pub(remote_cert)), daemon=True).start()
-            send_messages(s, sig_key, sig_cer,kem_cer,kem_key, remote_kem_key,extract_subject_public_key_info_hash(kem_cer),extract_subject_public_key_info_hash(remote_kem_cer))
+            threading.Thread(target=receive_messages, args=(s,
+                                                            kem_key,
+                                                            extract_pub(remote_cert),
+                                                            extract_pub(remote_kem_cer)
+                                                            ), daemon=True).start()
+            send_messages(s,
+                          sig_key,
+                          sig_cer,
+                          kem_key,
+                          extract_pub(remote_kem_cer))
         else:
             print("Ошибка в сертификатах удалённого собеседника.")
             sys.exit(1)
@@ -248,23 +251,27 @@ def listen_for_connection(host, port, sig_cer, sig_key, kem_cer, kem_key, truste
         print(f"Подключение от {addr}. Введите сообщения (exit для выхода):")
 
         send_file_data(conn, sig_cer)
-        send_file_data(conn, sig_key)
         send_file_data(conn, kem_cer)
-        send_file_data(conn, kem_key)
         send_file_data(conn, trusted_sig)
         send_file_data(conn, trusted_kem)
 
         remote_cert = receive_file_data(conn)
-        remote_key = receive_file_data(conn)
         remote_kem_cer = receive_file_data(conn)
-        remote_kem_key = receive_file_data(conn)
         remote_trusted_sig = receive_file_data(conn)
         remote_trusted_kem = receive_file_data(conn)
 
         if verify_trusted_data(remote_cert, remote_kem_cer, remote_trusted_sig, remote_trusted_kem):
             print("Сертификаты подтверждены.")
-            threading.Thread(target=receive_messages, args=(conn,sig_key, sig_cer,kem_cer,kem_key, remote_kem_key,extract_subject_public_key_info_hash(kem_cer),extract_subject_public_key_info_hash(remote_kem_cer),extract_subject_public_key_info_hash(remote_cert)), daemon=True).start()
-            send_messages(conn,sig_key, sig_cer,kem_cer,kem_key, remote_kem_key,extract_subject_public_key_info_hash(kem_cer),extract_subject_public_key_info_hash(remote_kem_cer))
+            threading.Thread(target=receive_messages, args=(conn,
+                                                            kem_key,
+                                                            extract_pub(remote_cert),
+                                                            extract_pub(remote_kem_cer)
+                                                            ), daemon=True).start()
+            send_messages(conn,
+                          sig_key,
+                          sig_cer,
+                          kem_key,
+                          extract_pub(remote_kem_cer))
         else:
             print("Ошибка в сертификатах удалённого собеседника.")
             sys.exit(1)
@@ -272,8 +279,8 @@ def listen_for_connection(host, port, sig_cer, sig_key, kem_cer, kem_key, truste
 def extract_pub(cert_base64):
     cert, _ = Certificate().decode(cert_base64)
 
-    spki = cert["tbsCertificate"]["subjectPublicKeyInfo"]["subjectPublicKey"]._value[1]
-    return spki
+    spki = cert["tbsCertificate"]["subjectPublicKeyInfo"]["subjectPublicKey"]._value
+    return pub_unmarshal(spki[1:][0][:-1])
 
 def extract_subject_public_key_info_hash(cert_base64):
     cert, _ = Certificate().decode(cert_base64)
