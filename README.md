@@ -8,6 +8,7 @@
 - [pyderasn](http://www.pyderasn.cypherpunks.su/)
 
 
+## Пример запуска программы
 python3 twoway.py --bind "0.0.0.0:port" 
   --sig-cer for-signature.cer 
   --sig-key for-signature.prv 
