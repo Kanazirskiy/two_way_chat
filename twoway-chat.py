@@ -14,6 +14,9 @@ from pyderasn import Any, OctetString, Sequence, SetOf, IA5String, ObjectIdentif
 import os
 import struct
 from pygost.gost3412 import GOST3412Kuznechik
+from pygost.gost3410_vko import kek_34102012256
+from pygost.kdf import kdf_gostr3411_2012_256
+from pygost.gost28147 import cfb_encrypt, cfb_decrypt
 
 curve = CURVES["id-tc26-gost-3410-12-512-paramSetA"]
 BLOCK_SIZE = 16
@@ -53,8 +56,17 @@ def receive_messages(conn, sig_prv_raw, sig_cert_der,kem_cer,recipient_prv_raw,p
 
             recipient_info = enveloped_data["recipientInfos"]
             encrypted_key = recipient_info["encryptedKey"]
-            session_key = encrypted_key._value
-            test_key = encrypted_key.decode
+
+            ciphertext1 = encrypted_key._value
+
+            sender_pub = public_key(curve, prv_unmarshal(prv_raw))
+            ukm_bytes = b"\x01\x02\x03\x04\x05\x06\x07\x08"
+            seed = b"\x09\x0A\x0B\x0C\x0D\x0E\x0F\x10"
+            ukm = int.from_bytes(ukm_bytes, "little")
+            shared_secret = kek_34102012256(curve,prv_unmarshal(recipient_prv_raw),sender_pub,ukm)
+            key = kdf_gostr3411_2012_256(shared_secret, ukm_bytes, seed)
+            session_key = cfb_decrypt(key, ciphertext1, iv=b"\x00" * 8)
+
             cipher = GOST3412Kuznechik(session_key)
             encrypted_content = enveloped_data["encryptedContent"]._value
 
@@ -120,7 +132,7 @@ def send_messages(sock, sig_prv_raw, sig_cert_der,kem_cer,prv_raw, recipient_prv
             ])
 
             encap_content_info = EncapsulatedContentInfo([
-                ("eContentType", ObjectIdentifier("1.2.840.113549.1.7.1")),  # id-data
+                ("eContentType", ObjectIdentifier("1.2.840.113549.1.7.1")),
                 ("eContent", OctetString(message_bytes)),
             ])
 
@@ -139,6 +151,13 @@ def send_messages(sock, sig_prv_raw, sig_cert_der,kem_cer,prv_raw, recipient_prv
             der_signed = content_info.encode()
 
             session_key = urandom(32)
+            ukm_bytes = b"\x01\x02\x03\x04\x05\x06\x07\x08"
+            ukm = int.from_bytes(ukm_bytes, "little")
+            seed = b"\x09\x0A\x0B\x0C\x0D\x0E\x0F\x10"
+            shared_secret = kek_34102012256(curve, prv_unmarshal(prv_raw), public_key(curve, prv_unmarshal(recipient_prv_raw)), ukm)
+            key = kdf_gostr3411_2012_256(shared_secret, ukm_bytes, seed)
+            iv = urandom(8)
+            ciphertext = cfb_encrypt(key, session_key, iv=b"\x00" * 8)
 
             cipher = GOST3412Kuznechik(session_key)
             padded_signed = pad(der_signed)
@@ -150,18 +169,18 @@ def send_messages(sock, sig_prv_raw, sig_cert_der,kem_cer,prv_raw, recipient_prv
 
 
             recipient_info = RecipientInfo([
-                ("encryptedKey", OctetString(session_key)),
+                ("encryptedKey", OctetString(ciphertext)),
             ])
             enveloped_data = EnvelopedData([
                 ("version", CMSVersion(0)),
-                ("recipientInfos", recipient_info),  # Передаем список RecipientInfo
+                ("recipientInfos", recipient_info),
                 ("contentType", ObjectIdentifier("1.2.840.113549.1.7.2")),
                 ("contentEncryptionAlgorithm", AlgorithmIdentifier([("algorithm", ObjectIdentifier("1.2.643.7.1.1.5.1")),])),
                 ("encryptedContent", OctetString(encrypted_content)),
             ])
 
             content_info_enveloped = ContentInfoEnveloped([
-                ("contentType", ObjectIdentifier("1.2.840.113549.1.7.3")),  # id-envelopedData
+                ("contentType", ObjectIdentifier("1.2.840.113549.1.7.3")),
                 ("content", enveloped_data),
             ])
             der_enveloped = content_info_enveloped.encode()
@@ -212,7 +231,7 @@ def initiate_connection(host, port, sig_cer, sig_key, kem_cer, kem_key, trusted_
 
         if verify_trusted_data(remote_cert, remote_kem_cer, remote_trusted_sig, remote_trusted_kem):
             print("Сертификаты подтверждены.")
-            threading.Thread(target=receive_messages, args=(s,sig_key, sig_cer,kem_cer,kem_key, remote_kem_key,extract_subject_public_key_info_hash(remote_kem_cer),extract_subject_public_key_info_hash(kem_cer),extract_subject_public_key_info_hash(remote_cert)), daemon=True).start()
+            threading.Thread(target=receive_messages, args=(s,sig_key, sig_cer,kem_cer,kem_key, remote_kem_key,extract_subject_public_key_info_hash(remote_kem_cer),extract_subject_public_key_info_hash(kem_cer),extract_pub(remote_cert)), daemon=True).start()
             send_messages(s, sig_key, sig_cer,kem_cer,kem_key, remote_kem_key,extract_subject_public_key_info_hash(kem_cer),extract_subject_public_key_info_hash(remote_kem_cer))
         else:
             print("Ошибка в сертификатах удалённого собеседника.")
@@ -249,6 +268,12 @@ def listen_for_connection(host, port, sig_cer, sig_key, kem_cer, kem_key, truste
         else:
             print("Ошибка в сертификатах удалённого собеседника.")
             sys.exit(1)
+
+def extract_pub(cert_base64):
+    cert, _ = Certificate().decode(cert_base64)
+
+    spki = cert["tbsCertificate"]["subjectPublicKeyInfo"]["subjectPublicKey"]._value[1]
+    return spki
 
 def extract_subject_public_key_info_hash(cert_base64):
     cert, _ = Certificate().decode(cert_base64)
