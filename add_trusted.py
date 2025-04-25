@@ -45,7 +45,7 @@ def main():
         append_to_file_if_new(TRUSTED_KEM_FILE, kem_fp)
 
     if not args.sig_cer and not args.kem_cer:
-        print("⚠ Укажи хотя бы один из параметров --sig-cer или --kem-cer")
+        print("Укажи хотя бы один из параметров --sig-cer или --kem-cer")
 
 if __name__ == "__main__":
     main()
