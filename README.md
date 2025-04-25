@@ -2,10 +2,10 @@
 Безопасный чат на двоих
 
 ## Генерация самоподписанных сертификатов для тестирования
-python3 generate_selfsigned_cert.py 
-  --sig-cer sig_cer.cer 
-  --sig-key sig_key.prv
-  --kem-cer kem_cer.cer 
+python3 generate_selfsigned_cert.py \\
+  --sig-cer sig_cer.cer \\
+  --sig-key sig_key.prv \\
+  --kem-cer kem_cer.cer \\
   --kem-key kem_key.prv
 
 ## Пополнение доверенных хэшей сертификатов
