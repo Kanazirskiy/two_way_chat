@@ -9,8 +9,8 @@ python3 generate_selfsigned_cert.py
   --kem-key kem_key.prv
 
 ## Пополнение доверенных хэшей сертификатов
-python3 add_trusted.py
-  --sig-cer sig_cer.cer
+python3 add_trusted.py  
+  --sig-cer sig_cer.cer  
   --kem-cer kem_cer.cer 
 
 
