@@ -139,7 +139,6 @@ class SignedData(Sequence):
         ("version", CMSVersion()),
         ("digestAlgorithms", AlgorithmIdentifier()),
         ("encapContentInfo", EncapsulatedContentInfo()),
-        ("certificates", Any(optional=True)),
         ("signerInfos", SignerInfos()),
     )
 
@@ -151,8 +150,11 @@ class ContentInfo(Sequence):
 
 class RecipientInfo(Sequence):
     schema = (
+        ("version", CMSVersion()),
+        ("keyEncryptionAlgorithm", AlgorithmIdentifier()),
         ("encryptedKey", OctetString()),
     )
+
 
 
 class EnvelopedData(Sequence):
