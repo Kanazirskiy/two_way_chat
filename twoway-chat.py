@@ -5,44 +5,91 @@ import socket
 import struct
 import sys
 import threading
-
+from base64 import b64decode
 from os import urandom
 
-import pyderasn
-from pyderasn import Any, OctetString, Sequence, SetOf, IA5String, ObjectIdentifier
+from pyderasn import Any
+from pyderasn import BitString
+from pyderasn import Boolean
+from pyderasn import IA5String
+from pyderasn import Integer
+from pyderasn import OctetString
+from pyderasn import PrintableString
+from pyderasn import UTCTime
 
-from classes import *
 
-from pygost.gost28147 import (
-    SBOXES, block2ns, ns2block, cfb_encrypt, cfb_decrypt
-)
-import pygost.gost28147
+from pygost.asn1schemas.x509 import AlgorithmIdentifier
+from pygost.asn1schemas.x509 import Certificate
+from pygost.asn1schemas.x509 import CertificateSerialNumber
+from pygost.asn1schemas.x509 import GostR34102012PublicKeyParameters
+from pygost.asn1schemas.x509 import Name
+from pygost.asn1schemas.x509 import ObjectIdentifier
+from pygost.asn1schemas.x509 import SubjectPublicKeyInfo
+
+from pygost.asn1schemas.cms import Attribute
+from pygost.asn1schemas.cms import AttributeValue
+from pygost.asn1schemas.cms import AttributeValues
+from pygost.asn1schemas.cms import CMSVersion
+from pygost.asn1schemas.cms import CertificateChoices
+from pygost.asn1schemas.cms import CertificateSet
+from pygost.asn1schemas.cms import ContentEncryptionAlgorithmIdentifier
+from pygost.asn1schemas.cms import ContentInfo
+from pygost.asn1schemas.cms import ContentType
+from pygost.asn1schemas.cms import DigestAlgorithmIdentifier
+from pygost.asn1schemas.cms import DigestAlgorithmIdentifiers
+from pygost.asn1schemas.cms import EncapsulatedContentInfo
+from pygost.asn1schemas.cms import EncryptedContent
+from pygost.asn1schemas.cms import EncryptedContentInfo
+from pygost.asn1schemas.cms import EncryptedKey
+from pygost.asn1schemas.cms import EnvelopedData
+from pygost.asn1schemas.cms import Gost341215EncryptionParameters
+from pygost.asn1schemas.cms import GostR341012KEGParameters
+from pygost.asn1schemas.cms import IssuerAndSerialNumber
+from pygost.asn1schemas.cms import KeyAgreeRecipientIdentifier
+from pygost.asn1schemas.cms import KeyAgreeRecipientInfo
+from pygost.asn1schemas.cms import KeyEncryptionAlgorithmIdentifier
+from pygost.asn1schemas.cms import OriginatorIdentifierOrKey
+from pygost.asn1schemas.cms import OriginatorPublicKey
+from pygost.asn1schemas.cms import RecipientEncryptedKey
+from pygost.asn1schemas.cms import RecipientEncryptedKeys
+from pygost.asn1schemas.cms import RecipientInfo
+from pygost.asn1schemas.cms import RecipientInfos
+from pygost.asn1schemas.cms import SignatureAlgorithmIdentifier
+from pygost.asn1schemas.cms import SignatureValue
+from pygost.asn1schemas.cms import SignerIdentifier
+from pygost.asn1schemas.cms import SignerInfo
+from pygost.asn1schemas.cms import SignerInfos
+from pygost.asn1schemas.cms import SignedData
+from pygost.asn1schemas.cms import UnprotectedAttributes
+from pygost.asn1schemas.cms import UserKeyingMaterial
+
+from pygost.asn1schemas.oids import id_data
+from pygost.asn1schemas.oids import id_signedData
+from pygost.asn1schemas.oids import id_contentType
+from pygost.asn1schemas.oids import id_envelopedData
+from pygost.asn1schemas.oids import id_gostr3412_2015_kuznyechik_ctracpkm
+from pygost.asn1schemas.oids import id_gostr3412_2015_kuznyechik_wrap_kexp15
+from pygost.asn1schemas.oids import id_tc26_gost3410_2012_256_paramSetA
+from pygost.asn1schemas.oids import id_tc26_gost3410_2012_256
+from pygost.asn1schemas.oids import id_tc26_gost3411_2012_256
+
+from pygost.asn1schemas.prvkey import PrivateKey
+from pygost.asn1schemas.prvkey import PrivateKeyInfo
+
 
 from pygost.gost3410 import (
     CURVES, pub_marshal, pub_unmarshal, prv_unmarshal, public_key, sign, verify
 )
+from pygost.gost34112012256 import new as gost3411_256
 from pygost.gost3410_vko import kek_34102012256
-from pygost.gost34112012512 import new as gost3411_256
 from pygost.gost3412 import GOST3412Kuznechik
-from pygost.kdf import kdf_gostr3411_2012_256
-from pygost.utils import hexenc
 from pygost.wrap import kexp15, kimp15
+from pygost.gost3413 import ctr
 
 
-sbox_name = "id-Gost28147-89-CryptoPro-A-ParamSet"
 curve = CURVES["id-tc26-gost-3410-12-256-paramSetA"]
 BLOCK_SIZE = 16
 
-def unpad(data):
-    pad_index = data.rfind(b"\x80")
-    if pad_index == -1:
-        return data
-    return data[:pad_index]
-
-
-def pad(data):
-    pad_len = BLOCK_SIZE - (len(data) % BLOCK_SIZE)
-    return data + b"\x80" + b"\x00" * (pad_len - 1)
 
 def chunk(data, size):
     return [data[i:i+size] for i in range(0, len(data), size)]
@@ -63,61 +110,64 @@ def receive_messages(conn,recipient_prv_raw, sender_sig_pub,sender_pub):
                     raise ValueError("Оборванное сообщение")
                 der_data += chunk
 
-            decoded_content_info = ContentInfoEnveloped().decod(der_data)
-            enveloped = decoded_content_info["content"]
+            ci_recv = ContentInfo().decod(der_data)
+            enveloped = EnvelopedData().decod(bytes(ci_recv["content"]))
+            recipient_info = enveloped["recipientInfos"][0]["kari"]
+            enc_info = enveloped["encryptedContentInfo"]
 
-            recipient_info = enveloped["recipientInfos"]
-            ciphertext_recv = bytes(recipient_info["encryptedKey"])
+            ukm_recv = bytes(recipient_info["ukm"])
+            encrypted_session_key_recv = bytes(recipient_info["recipientEncryptedKeys"][0]["encryptedKey"])
 
-            outer_alg = recipient_info["keyEncryptionAlgorithm"]
-            inner_alg = AlgorithmIdentifier().decod(bytes(outer_alg["parameters"]))
+            originator_pub_bytes = recipient_info["originator"]["originatorKey"]["publicKey"]
+            originator_pub = pub_unmarshal(bytes(originator_pub_bytes)[2:])
 
-            ukm_recv = bytes(OctetString().decod(bytes(inner_alg["parameters"])))
-            iv_recv = bytes(OctetString().decod(bytes(enveloped["contentEncryptionAlgorithm"]["parameters"])))
-            encrypted_content_recv = bytes(enveloped["encryptedContent"])
             shared_secret_recv = kek_34102012256(
                 curve,
                 recipient_prv,
-                sender_pub,
+                originator_pub,
                 int.from_bytes(ukm_recv, "little")
             )
-            kek_recv = kdf_gostr3411_2012_256(shared_secret_recv, ukm_recv, b"\x09\x0A\x0B\x0C\x0D\x0E\x0F\x10")
+            kuz = GOST3412Kuznechik(shared_secret_recv)
 
             session_key_recv = kimp15(
-                lambda blk: ns2block(pygost.gost28147.encrypt(sbox_name, kek_recv, block2ns(blk[:8]))),
-                lambda blk: ns2block(pygost.gost28147.encrypt(sbox_name, kek_recv, block2ns(blk[:8]))),
-                8,
-                ciphertext_recv,
+                kuz.encrypt,
+                kuz.encrypt,
+                16,
+                encrypted_session_key_recv,
                 ukm_recv
             )
+            iv_recv = None
+            for attr in enveloped["unprotectedAttrs"]:
+                if attr["attrType"] == ObjectIdentifier("1.2.643.7.1.999.1"):
+                    iv_recv = bytes(OctetString().decod(bytes(attr["attrValues"][0])))
+                    break
+            assert iv_recv is not None, "IV не найден в unprotectedAttrs"
 
-            decrypted = cfb_decrypt(
-                session_key_recv,
-                encrypted_content_recv,
-                iv=iv_recv,
-                sbox="id-tc26-gost-28147-param-Z"
-            )
-            unpadded = unpad(decrypted)
+            encrypted_content_recv = bytes(enc_info["encryptedContent"])
+            cipher = GOST3412Kuznechik(session_key_recv)
+            signed_der = ctr(cipher.encrypt, 16, encrypted_content_recv, iv_recv)
 
-            content_info_signed = ContentInfo().decod(unpadded)
-            signed_data = content_info_signed["content"]
 
-            encap = signed_data["encapContentInfo"]
-            signed_content = bytes(encap["eContent"])
+            signed = SignedData().decod(signed_der)
+            message = signed["encapContentInfo"]["eContent"]
 
-            signer_info = signed_data["signerInfos"][0]
+            signer_info = signed["signerInfos"][0]
             signature = bytes(signer_info["signature"])
-
-            dgst = gost3411_256(signed_content).digest()[::-1]
-            valid = verify(curve, sender_sig_pub, dgst, signature)
+            dgst = gost3411_256(bytes(message)).digest()[::-1]
+            cert = signed["certificates"][0]["certificate"]
+            pubkey_bytes = bytes(OctetString().decod(bytes(cert["tbsCertificate"]["subjectPublicKeyInfo"]["subjectPublicKey"])))
+            pubkey_point = pub_unmarshal(pubkey_bytes)
+            valid = verify(curve, pubkey_point, dgst, signature)
             if (not valid):
                 print("Подпись не корректна")
-            print(f"\n[СООБЩЕНИЕ ОТ СОБЕСЕДНИКА] {signed_content.decode('utf-8')}")
+            print(f"[СООБЩЕНИЕ ОТ СОБЕСЕДНИКА] {bytes(message).decode('utf-8')}")
 
 
-def send_messages(sock, sig_prv_raw, sig_cert_der,prv_raw,recipient_pub):
+def send_messages(sock,sig_prv_raw, sig_cert_der,prv_raw,remote_kem_cer,sender_kem_pub,recipient_pub):
     sig_prv = prv_unmarshal(sig_prv_raw)
     sender_prv = prv_unmarshal(prv_raw)
+    sender_cert = Certificate().decod(sig_cert_der)
+    recepient_kem_cer = Certificate().decod(remote_kem_cer)
     while True:
             text = input()
             if text.lower() == "exit":
@@ -130,100 +180,122 @@ def send_messages(sock, sig_prv_raw, sig_cert_der,prv_raw,recipient_pub):
             digest_algorithm = AlgorithmIdentifier([("algorithm", ObjectIdentifier("1.2.643.7.1.1.2.2"))])
             signature_algorithm = AlgorithmIdentifier([("algorithm", ObjectIdentifier("1.2.643.7.1.1.3.2")),])
 
-            rdnSeq = RDNSequence()
-            for oid, klass, value in (
-                ("2.5.4.6", PrintableString, "RU"),
-                ("2.5.4.3", PrintableString, "My Test Cert"),
-            ):
-                rdnSeq.append(RelativeDistinguishedName((
-                    AttributeTypeAndValue([
-                        ("type", AttributeType(oid)),
-                        ("value", AttributeValue(klass(value))),
-                    ]),
-                )))
-
-            issuer = Name(("rdnSequence", rdnSeq))
-            issuer_and_serial = IssuerAndSerialNumber([
-                ("issuer", issuer),
-                ("serialNumber", CertificateSerialNumber(extract_serial(sig_cert_der))),
-            ])
-
-            signer_info = SignerInfo([
+            signed_data = SignedData((
                 ("version", CMSVersion(1)),
-                ("sid", issuer_and_serial),
-                ("digestAlgorithm", digest_algorithm),
-                ("signatureAlgorithm", signature_algorithm),
-                ("signature", OctetString(signature)),
-            ])
-
-            encap_content_info = EncapsulatedContentInfo([
-                ("eContentType", ObjectIdentifier("1.2.840.113549.1.7.1")),
-                ("eContent", OctetString(message_bytes)),
-            ])
-
-            signed_data = SignedData([
-                ("version", CMSVersion(1)),
-                ("digestAlgorithms", digest_algorithm),
-                ("encapContentInfo", encap_content_info),
-                ("signerInfos", SignerInfos([signer_info])),
-            ])
-
-            content_info = ContentInfo([
-                ("contentType", ObjectIdentifier("1.2.840.113549.1.7.2")),
-                ("content", signed_data),
-            ])
-            der_signed = content_info.encode()
+                ("digestAlgorithms", DigestAlgorithmIdentifiers([
+                    AlgorithmIdentifier((
+                        ("algorithm", id_tc26_gost3411_2012_256),
+                    )),
+                ])),
+                ("encapContentInfo", EncapsulatedContentInfo((
+                    ("eContentType", ContentType(id_data)),
+                    ("eContent", OctetString(message_bytes)),
+                ))),
+                ("certificates", CertificateSet([
+                CertificateChoices(("certificate", sender_cert))
+                ])),
+                ("signerInfos", SignerInfos([
+                    SignerInfo((
+                        ("version", CMSVersion(1)),
+                        ("sid", SignerIdentifier(
+                            ("issuerAndSerialNumber", IssuerAndSerialNumber((
+                                ("issuer", sender_cert["tbsCertificate"]["issuer"]),
+                                ("serialNumber", sender_cert["tbsCertificate"]["serialNumber"]),
+                        ))))),
+                        ("digestAlgorithm", DigestAlgorithmIdentifier((
+                            ("algorithm", id_tc26_gost3411_2012_256),
+                        ))),
+                        ("signatureAlgorithm", SignatureAlgorithmIdentifier((
+                            ("algorithm", id_tc26_gost3410_2012_256),
+                        ))),
+                        ("signature", SignatureValue(OctetString(signature))),
+                    ))
+                ]))
+            ))
+            der_signed = signed_data.encode()
 
             session_key = urandom(32)
-            ukm = urandom(4)
-            shared_secret = kek_34102012256(curve, sender_prv, recipient_pub, int.from_bytes(ukm, "little"))
-            kek = kdf_gostr3411_2012_256(shared_secret, ukm, b"\x09\x0A\x0B\x0C\x0D\x0E\x0F\x10")
-            sbox_name = "id-Gost28147-89-CryptoPro-A-ParamSet"
-            sbox = SBOXES[sbox_name]
-            ciphertext = kexp15(
-                lambda blk: ns2block(pygost.gost28147.encrypt(sbox_name, kek, block2ns(blk[:8]))),
-                lambda blk: ns2block(pygost.gost28147.encrypt(sbox_name, kek, block2ns(blk[:8]))),
-                8,
+            ukm = urandom(8)
+            shared_secret = kek_34102012256(
+                curve,
+                sender_prv,
+                recipient_pub,
+                int.from_bytes(ukm, "little")
+            )
+
+            kuz = GOST3412Kuznechik(shared_secret)
+            encrypted_session_key = kexp15(
+                kuz.encrypt,
+                kuz.encrypt,
+                16,
                 session_key,
                 ukm
             )
-
             iv = urandom(8)
-            encrypted_content = cfb_encrypt(session_key, pad(der_signed), iv=iv, sbox="id-tc26-gost-28147-param-Z")
+            cipher = GOST3412Kuznechik(session_key)
+            encrypted_content = ctr(cipher.encrypt, 16, der_signed, iv)
+            originator_pubinfo = OriginatorPublicKey((
+                ("algorithm", AlgorithmIdentifier((
+                    ("algorithm", id_tc26_gost3410_2012_256),
+                    ("parameters", Any(GostR34102012PublicKeyParameters((
+                        ("publicKeyParamSet", id_tc26_gost3410_2012_256_paramSetA),
+                        ("digestParamSet", id_tc26_gost3411_2012_256),
+                    )))),
+                ))),
+                ("publicKey", BitString(OctetString(pub_marshal(sender_kem_pub)).encode())),
+            ))
 
-
-
-            ukm_param = AlgorithmIdentifier([
-                ("algorithm", ObjectIdentifier("1.2.643.2.2.13.1")),
-                ("parameters", Any(OctetString(ukm))),
-            ])
-
-            recipient_info = RecipientInfo([
+            recipient_info = RecipientInfo(("kari", KeyAgreeRecipientInfo((
                 ("version", CMSVersion(3)),
-                ("keyEncryptionAlgorithm", AlgorithmIdentifier([
-                    ("algorithm", ObjectIdentifier("1.2.643.7.1.1.6.1")),
-                    ("parameters", Any(ukm_param)),
+                ("originator", OriginatorIdentifierOrKey(("originatorKey", originator_pubinfo))),
+                ("ukm", UserKeyingMaterial(ukm)),
+                ("keyEncryptionAlgorithm", KeyEncryptionAlgorithmIdentifier((
+                    ("algorithm", id_gostr3412_2015_kuznyechik_wrap_kexp15),
+                    ("parameters", Any(GostR341012KEGParameters((
+                        ("algorithm", id_gostr3412_2015_kuznyechik_wrap_kexp15),
+                    )))),
+                ))),
+                ("recipientEncryptedKeys", RecipientEncryptedKeys([
+                    RecipientEncryptedKey((
+                        ("rid", KeyAgreeRecipientIdentifier(
+                            ("issuerAndSerialNumber", IssuerAndSerialNumber((
+                                ("issuer", recepient_kem_cer["tbsCertificate"]["issuer"]),
+                                ("serialNumber", recepient_kem_cer["tbsCertificate"]["serialNumber"]),
+                        ))))),
+                        ("encryptedKey", EncryptedKey(encrypted_session_key)),
+                    ))
                 ])),
-                ("encryptedKey", OctetString(ciphertext)),
-            ])
+            ))))
 
-            enveloped_data = EnvelopedData([
+            enveloped_data = EnvelopedData((
                 ("version", CMSVersion(0)),
-                ("recipientInfos", recipient_info),
-                ("contentType", ObjectIdentifier("1.2.840.113549.1.7.1")),
-                ("contentEncryptionAlgorithm", AlgorithmIdentifier([
-                    ("algorithm", ObjectIdentifier("1.2.643.2.2.31.1")),
-                    ("parameters", Any(OctetString(iv))),
-                ])),
-                ("encryptedContent", OctetString(encrypted_content)),
-            ])
+                ("recipientInfos", RecipientInfos([recipient_info])),
+                ("encryptedContentInfo", EncryptedContentInfo((
+                    ("contentType", ContentType(id_signedData)),
+                    ("contentEncryptionAlgorithm", ContentEncryptionAlgorithmIdentifier((
+                        ("algorithm", id_gostr3412_2015_kuznyechik_ctracpkm),
+                        ("parameters", Any(Gost341215EncryptionParameters((
+                            ("ukm", OctetString(ukm)),
+                        )))),
+                    ))),
+                    ("encryptedContent", EncryptedContent(encrypted_content)),
+                ))),
+                ("unprotectedAttrs", UnprotectedAttributes([
+                    Attribute((
+                        ("attrType", ContentType(ObjectIdentifier("1.2.643.7.1.999.1"))),
+                        ("attrValues", AttributeValues([
+                            AttributeValue(OctetString(iv))
+                        ]))
+                    ))
+                ]))
+            ))
 
-            content_info_enveloped = ContentInfoEnveloped([
-                ("contentType", ObjectIdentifier("1.2.840.113549.1.7.3")),
-                ("content", enveloped_data),
-            ])
+            ci = ContentInfo((
+                ("contentType", ContentType(id_envelopedData)),
+                ("content", Any(enveloped_data)),
+            ))
 
-            der_enveloped = content_info_enveloped.encode()
+            der_enveloped = ci.encode()
 
             sock.sendall(struct.pack(">I", len(der_enveloped)))
             sock.sendall(der_enveloped)
@@ -263,7 +335,7 @@ def initiate_connection(host, port, sig_cer, sig_key, kem_cer, kem_key, trusted_
         send_file_data(s, kem_cer)
 
         if verify_trusted_data(remote_cert, remote_kem_cer, trusted_sig, trusted_kem):
-            print("Сертификаты подтверждены.")
+            print("Сертификаты подтверждены.\n")
             threading.Thread(target=receive_messages, args=(s,
                                                             kem_key,
                                                             extract_pub(remote_cert),
@@ -273,6 +345,8 @@ def initiate_connection(host, port, sig_cer, sig_key, kem_cer, kem_key, trusted_
                           sig_key,
                           sig_cer,
                           kem_key,
+                          remote_kem_cer,
+                          extract_pub(kem_cer),
                           extract_pub(remote_kem_cer))
         else:
             print("Ошибка в сертификатах удалённого собеседника.")
@@ -295,7 +369,7 @@ def listen_for_connection(host, port, sig_cer, sig_key, kem_cer, kem_key, truste
         remote_kem_cer = receive_file_data(conn)
 
         if verify_trusted_data(remote_cert, remote_kem_cer, trusted_sig, trusted_kem):
-            print("Сертификаты подтверждены.")
+            print("Сертификаты подтверждены. \n")
             threading.Thread(target=receive_messages, args=(conn,
                                                             kem_key,
                                                             extract_pub(remote_cert),
@@ -305,6 +379,8 @@ def listen_for_connection(host, port, sig_cer, sig_key, kem_cer, kem_key, truste
                           sig_key,
                           sig_cer,
                           kem_key,
+                          remote_kem_cer,
+                          extract_pub(kem_cer),
                           extract_pub(remote_kem_cer))
         else:
             print("Ошибка в сертификатах удалённого собеседника.")
@@ -314,16 +390,7 @@ def extract_pub(cert):
     cert = Certificate().decod(cert)
 
     spk = bytes(cert["tbsCertificate"]["subjectPublicKeyInfo"]["subjectPublicKey"])
-    if spk[0] == 0x03:
-        return pub_unmarshal(spk[2:])
-    else:
-        return pub_unmarshal(spk)
-
-def extract_serial(cert):
-    cert = Certificate().decod(cert)
-
-    serial = int(cert["tbsCertificate"]["serialNumber"])
-    return serial
+    return pub_unmarshal(spk[2:])
 
 
 def extract_subject_public_key_info_hash(cert):
@@ -337,10 +404,19 @@ def extract_subject_public_key_info_hash(cert):
     stribog256_hash = hash_obj.digest().hex().upper()
     return stribog256_hash
 
+def extract_private_key(cert):
+    begin_marker = "-----BEGIN PRIVATE KEY-----"
+    end_marker = "-----END PRIVATE KEY-----"
+    cert = cert.replace(begin_marker, "").replace(end_marker, "").strip()
+    decoded_cert = b64decode(cert)
+    private_key_info = PrivateKeyInfo().decod(decoded_cert)
+    private_key = private_key_info["privateKey"]
+    return bytes(OctetString().decod(bytes(private_key)))
+
+
 def verify_trusted_data(cert_path, kem_cer_path, trusted_sig, trusted_kem):
     cert_hash = extract_subject_public_key_info_hash(cert_path).upper()
     key_hash = extract_subject_public_key_info_hash(kem_cer_path).upper()
-
 
     if cert_hash in trusted_sig and key_hash in trusted_kem:
         print("[✓] Сертификаты доверенные.")
@@ -351,6 +427,14 @@ def verify_trusted_data(cert_path, kem_cer_path, trusted_sig, trusted_kem):
         print(f"  Ключ:       {key_hash}")
         return False
 
+def unpem(pem_str):
+    lines = pem_str.strip().splitlines()
+    b64_body = "".join(
+        line for line in lines
+        if not (line.startswith("-----BEGIN") or line.startswith("-----END"))
+    )
+    return b64decode(b64_body)
+
 def main():
     parser = argparse.ArgumentParser(description="Программа для безопасного чата на двоих")
     parser.add_argument("--bind", help="IP и порт для прослушивания (респондер)", type=str)
@@ -360,23 +444,22 @@ def main():
     parser.add_argument("--sig-key", help="Путь к приватному ключу для подписи", type=str)
     parser.add_argument("--kem-cer", help="Путь к сертификату для соглашения ключей", type=str)
     parser.add_argument("--kem-key", help="Путь к приватному ключу для соглашения ключей", type=str)
-    parser.add_argument("--trusted-sig", help="Доверенный хэш для сертификата подписи", type=str)
-    parser.add_argument("--trusted-kem", help="Доверенный хэш для сертификата соглашения ключей", type=str)
+    parser.add_argument("--trusted-sig",nargs="+", help="Доверенный хэш для сертификата подписи", type=str)
+    parser.add_argument("--trusted-kem",nargs="+", help="Доверенный хэш для сертификата соглашения ключей", type=str)
 
     args = parser.parse_args()
 
-    with open(args.sig_cer, "rb") as f:
-        sig_cer = f.read()
-    with open(args.sig_key, "rb") as f:
-        sig_key = f.read()
-    with open(args.kem_cer, "rb") as f:
-        kem_cer = f.read()
-    with open(args.kem_key, "rb") as f:
-        kem_key = f.read()
-    with open(args.trusted_sig, "r") as f:
-        trusted_sig = {line.strip().upper() for line in f if line.strip()}
-    with open(args.trusted_kem, "r") as f:
-        trusted_kem = {line.strip().upper() for line in f if line.strip()}
+    with open(args.sig_cer, "r") as f:
+        sig_cer = unpem(f.read())
+    with open(args.sig_key, "r") as f:
+        sig_key = extract_private_key(f.read())
+    with open(args.kem_cer, "r") as f:
+        kem_cer = unpem(f.read())
+    with open(args.kem_key, "r") as f:
+        kem_key = extract_private_key(f.read())
+    trusted_sig = {h.upper() for h in args.trusted_sig}
+    trusted_kem = {h.upper() for h in args.trusted_kem}
+
 
     if args.bind:
         host, port = args.bind.rsplit(":", 1)
